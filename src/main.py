@@ -4,6 +4,9 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Optional
 
+import asyncio
+import json
+
 import uvicorn
 from fastapi import FastAPI, Request, HTTPException, Depends, Header
 from fastapi.responses import StreamingResponse
@@ -135,13 +138,37 @@ async def orchestrator_endpoint(
     )
 
     async def sse_event_generator():
+        # Optional: initial event so clients know the stream opened
+        yield "event: start\ndata: stream opened\n\n"
+
         try:
-            _qid = getattr(body, "question_id", None) 
+            _qid = getattr(body, "question_id", None)
             async for chunk in orchestrator.stream_response(ask, _qid):
-                yield f"{chunk}"
+                # Ensure chunk is text and won't break SSE formatting
+                if isinstance(chunk, (dict, list)):
+                    data = json.dumps(chunk, ensure_ascii=False)
+                else:
+                    data = str(chunk)
+
+                # SSE format: one or more "field: value" lines ending with a blank line.
+                # Split newlines into multiple data lines.
+                lines = data.splitlines() or [""]
+                for line in lines:
+                    yield f"data: {line}\n"
+                yield "\n"
+
+            # Optional: explicit end marker
+            yield "event: end\ndata: done\n\n"
+
+        except asyncio.CancelledError:
+            # Happens when client disconnects; not a server error
+            logging.info("SSE generator cancelled (client disconnected).")
+            return
+
         except Exception as e:
             logging.exception("Error in SSE generator")
-            yield f"event: error\ndata: {str(e)}\n\n"
+            msg = str(e).replace("\n", "\\n")
+            yield f"event: error\ndata: {msg}\n\n"
 
     return StreamingResponse(
         sse_event_generator(),

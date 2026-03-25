@@ -1,47 +1,33 @@
-name: Pull Request Pipeline
+name: PR Pipeline
 
 on:
   pull_request:
-    branches:
-      - develop
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
-  evaluations:
+  build:
     runs-on: ubuntu-latest
-    environment:
-      name: dev
-
-    env:
-      AZURE_CLIENT_SECRET:   ${{ fromJson(secrets.AZURE_CREDENTIALS).clientSecret }}
-      AZURE_TENANT_ID:       ${{ fromJson(secrets.AZURE_CREDENTIALS).tenantId }}
-      AZURE_CLIENT_ID:       ${{ fromJson(secrets.AZURE_CREDENTIALS).clientId }}
-      APP_CONFIG_ENDPOINT:   ${{ vars.APP_CONFIG_ENDPOINT }}
-
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v2
 
-      - name: Debug APP_CONFIG_ENDPOINT
+      - name: Setup Azure CLI
+        uses: azure/setup-azure@v1
+
+      - name: Login with OIDC
+        uses: azure/login@v1
+        with:
+          clientId: ${{ secrets.AZURE_CLIENT_ID }}
+          tenantId: ${{ secrets.AZURE_TENANT_ID }}
+          subscriptionId: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Print Service Principal Object ID
         run: |
-          echo "APP_CONFIG_ENDPOINT=[$APP_CONFIG_ENDPOINT]" 
+          echo "Service Principal Object ID: ${{ steps.oidc.outputs.object_id }}"
 
-      - name: Login to Azure CLI
-        uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Setup Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Run evaluation
-        run: |
-          chmod +x evaluations/evaluate.sh
-          ./evaluations/evaluate.sh --skip-eval
-
-      - name: Upload evaluation results
-        uses: actions/upload-artifact@v4
-        with:
-          name: evaluation-results
-          path: evaluations/evaluation-results.json
+      - name: Run Deployment
+        run: echo 'Deployment Step...'

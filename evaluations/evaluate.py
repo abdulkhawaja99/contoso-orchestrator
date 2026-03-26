@@ -1,9 +1,10 @@
 import sys
 import logging
+import os
 from pathlib import Path
 from datetime import datetime, UTC
 
-from azure.identity import ChainedTokenCredential, ManagedIdentityCredential, AzureCliCredential
+from azure.identity import ClientSecretCredential
 
 import azure.ai.projects
 print(azure.ai.projects.__version__)
@@ -26,12 +27,12 @@ logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(l
 # 1) Configuration & logging
 
 cfg = AppConfigClient()
-model_api_key_secret_name = cfg.get("EVALUATIONS_MODEL_API_KEY_SECRET_NAME") or "evaluationsModelApiKey"
+model_api_key_name = cfg.get("EVALUATIONS_MODEL_API_KEY_SECRET_NAME") or "evaluationsModelApiKey"
 keyvault_client = KeyVaultClient()
-MODEL_API_KEY = keyvault_client.get_secret(model_api_key_secret_name)
+MODEL_API_KEY = keyvault_client.get_secret(model_api_key_name)
 if not MODEL_API_KEY:
     logger = logging.getLogger("cloud_evaluation")
-    logger.error(f"Model API key secret '{model_api_key_secret_name}' not found in Key Vault.")
+    logger.error(f"Model API key secret '{model_api_key_name}' not found in Key Vault.")
     sys.exit(1)
 
 PROJECT_ENDPOINT      = cfg.get("AI_FOUNDRY_PROJECT_ENDPOINT")
@@ -52,8 +53,19 @@ if not (PROJECT_ENDPOINT and MODEL_ENDPOINT and MODEL_DEPLOYMENT_NAME and MODEL_
     logger.error("Missing one or more required settings: PROJECT_ENDPOINT, MODEL_ENDPOINT, CHAT_DEPLOYMENT_NAME, or MODEL_API_KEY")
     sys.exit(1)
 
-# 2) Initialize AIProjectClient
-credential = ChainedTokenCredential(ManagedIdentityCredential(), AzureCliCredential())
+# 2) Initialize AIProjectClient using ClientSecretCredential
+# This explicitly uses the SP credentials from env vars, avoiding AzureCliCredential's
+# tenant resolution issue which causes "object id: empty" errors in corporate tenants.
+tenant_id     = os.environ["AZURE_TENANT_ID"]
+client_id     = os.environ["AZURE_CLIENT_ID"]
+client_secret = os.environ["AZURE_CLIENT_SECRET"]
+
+credential = ClientSecretCredential(
+    tenant_id=tenant_id,
+    client_id=client_id,
+    client_secret=client_secret,
+)
+logger.info(f"Using ClientSecretCredential for client_id={client_id}, tenant_id={tenant_id}")
 project_client = AIProjectClient(endpoint=PROJECT_ENDPOINT, credential=credential)
 logger.info(f"Connected to AI Foundry: {PROJECT_ENDPOINT}")
 

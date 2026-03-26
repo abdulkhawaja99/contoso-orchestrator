@@ -1,15 +1,13 @@
 import sys
 import logging
+import json
+import base64
 from pathlib import Path
 from datetime import datetime, UTC
-
-from azure.identity import ChainedTokenCredential, ManagedIdentityCredential, AzureCliCredential
-
+from azure.identity import AzureCliCredential
 import azure.ai.projects
 print(azure.ai.projects.__version__)
-
 from azure.ai.projects import AIProjectClient
-
 from azure.core.exceptions import HttpResponseError
 from azure.ai.projects.models import (
     EvaluatorConfiguration,
@@ -24,7 +22,6 @@ from keyvault import KeyVaultClient
 logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
 
 # 1) Configuration & logging
-
 cfg = AppConfigClient()
 model_api_key_secret_name = cfg.get("EVALUATIONS_MODEL_API_KEY_SECRET_NAME") or "evaluationsModelApiKey"
 keyvault_client = KeyVaultClient()
@@ -34,12 +31,12 @@ if not MODEL_API_KEY:
     logger.error(f"Model API key secret '{model_api_key_secret_name}' not found in Key Vault.")
     sys.exit(1)
 
-PROJECT_ENDPOINT      = cfg.get("AI_FOUNDRY_PROJECT_ENDPOINT")
-MODEL_ENDPOINT        = cfg.get("AI_FOUNDRY_ACCOUNT_ENDPOINT")  # e.g. https://<account>.services.ai.azure.com
+PROJECT_ENDPOINT = cfg.get("AI_FOUNDRY_PROJECT_ENDPOINT")
+MODEL_ENDPOINT = cfg.get("AI_FOUNDRY_ACCOUNT_ENDPOINT")
 MODEL_DEPLOYMENT_NAME = cfg.get("CHAT_DEPLOYMENT_NAME")
-DATASET_NAME          = cfg.get("DATASET_NAME", "eval-dataset")
-DATASET_VERSION       = datetime.now(UTC).strftime("v%Y%m%d%H%M%S")
-INPUT_FILE            = cfg.get(
+DATASET_NAME = cfg.get("DATASET_NAME", "eval-dataset")
+DATASET_VERSION = datetime.now(UTC).strftime("v%Y%m%d%H%M%S")
+INPUT_FILE = cfg.get(
     "EVAL_INPUT_FILE",
     str(Path(__file__).parent.parent / "dataset" / "eval-input.jsonl")
 )
@@ -52,8 +49,21 @@ if not (PROJECT_ENDPOINT and MODEL_ENDPOINT and MODEL_DEPLOYMENT_NAME and MODEL_
     logger.error("Missing one or more required settings: PROJECT_ENDPOINT, MODEL_ENDPOINT, CHAT_DEPLOYMENT_NAME, or MODEL_API_KEY")
     sys.exit(1)
 
-# 2) Initialize AIProjectClient
-credential = ChainedTokenCredential(ManagedIdentityCredential(), AzureCliCredential())
+# 2) Initialize AIProjectClient — explicitly use AzureCliCredential only
+credential = AzureCliCredential()
+
+# DEBUG: Decode and log the token OID so we can confirm correct identity
+try:
+    token = credential.get_token("https://management.azure.com/.default")
+    payload = token.token.split('.')[1]
+    payload += '=' * (4 - len(payload) % 4)
+    claims = json.loads(base64.b64decode(payload))
+    logger.info(f"[DEBUG] Token OID : {claims.get('oid', 'NOT FOUND')}")
+    logger.info(f"[DEBUG] Token UPN : {claims.get('upn', claims.get('unique_name', 'NOT FOUND'))}")
+    logger.info(f"[DEBUG] Token AppID: {claims.get('appid', 'NOT FOUND')}")
+except Exception as e:
+    logger.warning(f"[DEBUG] Could not decode token for inspection: {e}")
+
 project_client = AIProjectClient(endpoint=PROJECT_ENDPOINT, credential=credential)
 logger.info(f"Connected to AI Foundry: {PROJECT_ENDPOINT}")
 
@@ -87,27 +97,25 @@ evaluators = {
         init_params={"deployment_name": MODEL_DEPLOYMENT_NAME},
         data_mapping={"query": "${data.query}", "context": "${data.context}"}
     ),
-
     "safety": EvaluatorConfiguration(
         id=EvaluatorIds.CONTENT_SAFETY,
-        init_params={"deployment_name": MODEL_DEPLOYMENT_NAME},        
+        init_params={"deployment_name": MODEL_DEPLOYMENT_NAME},
         data_mapping={"response": "${data.response}", "query": "${data.query}"}
     )
 }
 
-# 5) Submit evaluation with both required headers
+# 5) Submit evaluation
 evaluation = Evaluation(
     display_name="Cloud evaluation run",
     description="Pre-deployment RAG evaluation",
     data=InputDataset(id=dataset.id),
     evaluators=evaluators
 )
-
 logger.info("Submitting evaluation with required headers...")
 try:
     eval_response = project_client.evaluations.create(
         evaluation,
-        headers = {
+        headers={
             "model-endpoint": MODEL_ENDPOINT,
             "api-key": MODEL_API_KEY,
         }
@@ -119,10 +127,9 @@ except HttpResponseError as e:
 
 # 6) Save run details
 try:
-    # Attempt to extract the AiStudioEvaluationUri from the response
     evaluation_url = eval_response.as_dict().get("properties", {}).get("AiStudioEvaluationUri")
     if evaluation_url:
-        logger.info(f"Evaluation started. You can view the results at: \033[94m\033[4m{evaluation_url}\033[0m")
+        logger.info(f"Evaluation started. View results at: \033[94m\033[4m{evaluation_url}\033[0m")
     else:
         logger.warning("Evaluation started, but the evaluation URL could not be retrieved.")
 except Exception as e:
